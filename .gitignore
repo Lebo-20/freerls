@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+
+# Env & Credentials
+.env
+credentials.json
+processed.json
+bot_session.session
+bot_session.session-journal
+
+# Downloads & Temp
+downloads/
+*.mp4
+*.ts
+*.srt
+*.vtt
+*.ass
+file_list.txt
+thumb_*.jpg
+
+# Logs
+*.log

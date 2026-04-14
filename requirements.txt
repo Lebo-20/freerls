@@ -1,0 +1,11 @@
+httpx
+telethon
+python-dotenv
+tqdm
+aiofiles
+aiopath
+pyyaml
+gspread
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
