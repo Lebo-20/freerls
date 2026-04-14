@@ -9,6 +9,15 @@ logger = logging.getLogger(__name__)
 
 class TelegramUploader:
     def __init__(self):
+        # Auto clear session to prevent sqlite corruption issues
+        session_name = 'bot_session.session'
+        if os.path.exists(session_name):
+            try:
+                os.remove(session_name)
+                logger.info(f"Existing session {session_name} deleted.")
+            except Exception as e:
+                logger.error(f"Failed to delete session file: {e}")
+                
         self.client = TelegramClient('bot_session', API_ID, API_HASH)
 
     async def start(self):
