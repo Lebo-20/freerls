@@ -12,13 +12,18 @@ class VideoMerger:
             logger.error("No videos to merge")
             return False
 
-        list_file = "file_list.txt"
-        with open(list_file, "w", encoding="utf-8") as f:
-            for path in video_paths:
-                abs_path = os.path.abspath(path).replace("\\", "/")
-                f.write(f"file '{abs_path}'\n")
-
+        # Use a unique list file name based on output path to avoid conflict
+        dir_name = os.path.dirname(output_path)
+        base_name = os.path.basename(output_path).replace(".mp4", "")
+        list_file = os.path.join(dir_name, f"list_{base_name}.txt")
+        
         try:
+            with open(list_file, "w", encoding="utf-8") as f:
+                for path in video_paths:
+                    # Escape single quotes in path for FFmpeg list file
+                    abs_path = os.path.abspath(path).replace("\\", "/").replace("'", "'\\''")
+                    f.write(f"file '{abs_path}'\n")
+
             if fast_mode:
                 cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy", output_path]
             else:
@@ -28,23 +33,38 @@ class VideoMerger:
                     "-c:a", "aac", "-b:a", "128k", output_path
                 ]
 
+            logger.info(f"Running merge command: {' '.join(cmd)}")
             process = subprocess.run(cmd, capture_output=True, text=True)
-            return process.returncode == 0
+            
+            if process.returncode != 0:
+                logger.error(f"FFmpeg Merge Failed (code {process.returncode})")
+                logger.error(f"Stderr: {process.stderr}")
+                return False
+            
+            return True
         except Exception as e:
-            logger.error(f"Merge error: {e}")
+            logger.error(f"Merge exception: {e}")
             return False
         finally:
-            if os.path.exists(list_file): os.remove(list_file)
+            if os.path.exists(list_file):
+                try: os.remove(list_file)
+                except: pass
 
     @staticmethod
-    def burn_subtitle(video_path, sub_path, output_path):
+    def burn_subtitle(video_path, sub_path, output_path, crf=None):
         """Hardcode subtitle into video with custom styling."""
-        if not os.path.exists(sub_path): return False
+        if not os.path.exists(sub_path):
+            logger.error(f"Subtitle file not found: {sub_path}")
+            return False
+        
+        target_crf = crf if crf is not None else FFMPEG_CRF
+        
         try:
             # Escape path for FFmpeg (Windows specific)
-            clean_sub_path = os.path.abspath(sub_path).replace("\\", "/").replace(":", "\\:")
+            abs_sub = os.path.abspath(sub_path).replace("\\", "/")
+            clean_sub_path = abs_sub.replace(":", "\\:").replace("'", "'\\''")
             
-            # Custom Style: Font Standard Symbols PS, Size 10, Bold, Outline 1 Black, MarginV 90
+            # Custom Style
             style = (
                 "Fontname=Standard Symbols PS,FontSize=10,Bold=1,"
                 "PrimaryColour=&HFFFFFF,Outline=1,OutlineColour=&H000000,"
@@ -53,12 +73,28 @@ class VideoMerger:
             
             cmd = [
                 "ffmpeg", "-y", "-i", video_path,
-                "-vf", f"subtitles='{clean_sub_path}':force_style='{style}'",
-                "-c:v", "libx264", "-crf", str(FFMPEG_CRF), "-preset", FFMPEG_PRESET,
+                "-vf", f"scale=720:-2,subtitles='{clean_sub_path}':force_style='{style}'",
+                "-c:v", "libx264", "-crf", str(target_crf), "-preset", FFMPEG_PRESET,
                 "-c:a", "copy", output_path
             ]
+            
+            logger.info(f"Running burn command: {' '.join(cmd)}")
             process = subprocess.run(cmd, capture_output=True, text=True)
-            return process.returncode == 0
+            
+            if process.returncode != 0:
+                logger.error(f"FFmpeg Burn Failed (code {process.returncode})")
+                logger.error(f"Stderr: {process.stderr}")
+                return False
+                
+            return True
         except Exception as e:
-            logger.error(f"Burn error: {e}")
+            logger.error(f"Burn exception: {e}")
             return False
+
+def sanitize_filename(filename):
+    """Remove characters that are invalid in Windows filenames."""
+    if not filename: return "video"
+    # Keep alphanumeric, space, dot, underscore, hyphen
+    valid_chars = "-_.() abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    filename = "".join(c for c in filename if c in valid_chars)
+    return filename.strip()[:100] # Limit length

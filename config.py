@@ -3,6 +3,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+DATABASE_URL = os.getenv("DATABASE_URL")
+
 # FreeReels API Configuration
 FREEREELS_API_KEY = os.getenv("FREEREELS_API_KEY", "YOUR_TOKEN_HERE")
 BASE_URL = "https://captain.sapimu.au/freereels/api/v1"
@@ -33,5 +35,8 @@ PRIORITY_HIGH = 1
 PRIORITY_LOW = 2
 
 # FFmpeg Settings
-FFMPEG_CRF = 23
-FFMPEG_PRESET = "ultrafast"
+FFMPEG_CRF = 24
+FFMPEG_PRESET = "fast"
+
+# Upload Settings
+MAX_UPLOAD_SIZE = 1900 * 1024 * 1024 # 1900 MB to be safe

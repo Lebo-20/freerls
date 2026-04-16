@@ -9,15 +9,16 @@ from telethon import events, Button
 
 from api import FreeReelsAPI
 from downloader import Downloader
-from merge import VideoMerger
+from merge import VideoMerger, sanitize_filename
 from uploader import TelegramUploader
 from gsheets_db import GoogleSheetsDB
+from postgres_db import PostgresDB
 from task_manager import DramaTask, TaskQueue
 from ui_utils import generate_progress_bar, calculate_eta
 from config import (
     BOT_TOKEN, DOWNLOAD_DIR, AUTO_SCAN_INTERVAL, 
     MAX_WORKERS, SEMAPHORE_LIMIT, PRIORITY_HIGH, PRIORITY_LOW,
-    CHANNEL_ID, ADMIN_ID
+    CHANNEL_ID, ADMIN_ID, MAX_UPLOAD_SIZE
 )
 
 # Setup logging
@@ -31,6 +32,7 @@ class FreeReelsBot:
         self.merger = VideoMerger()
         self.uploader = TelegramUploader()
         self.db = GoogleSheetsDB()
+        self.pg_db = PostgresDB()
         self.task_queue = TaskQueue()
         self.semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
         self.workers = []
@@ -219,7 +221,12 @@ class FreeReelsBot:
                 async with self.semaphore:
                     success = False
                     for attempt in range(3):
-                        if await self.process_drama(task, name, attempt + 1):
+                        result = await self.process_drama(task, name, attempt + 1)
+                        if result:
+                            if result is True: # Actual upload success, not a skip
+                                logger.info(f"✅ {name} selesai upload drama baru. Bot istirahat 10 menit...")
+                                await asyncio.sleep(600)
+                            
                             success = True
                             break
                         
@@ -259,7 +266,10 @@ class FreeReelsBot:
             if not detail: return False
             drama_info = detail # Root object
             title = drama_info.get("title") or drama_info.get("name", f"Drama_{drama_id}")
-            if self.db.is_processed(title): return True
+            safe_title = sanitize_filename(title)
+            if self.db.is_processed(title) or self.pg_db.is_processed(title): 
+                logger.info(f"⏩ {title} sudah pernah diproses. Skipping...")
+                return "SKIP"
             
             ep_data = await self.api.get_episodes(drama_id)
             # API returns results in 'episode_list' 
@@ -270,10 +280,30 @@ class FreeReelsBot:
             
             total_eps = len(episodes)
             
+            # Dynamic CRF Selection based on episode count
+            if total_eps > 25:
+                dynamic_crf = 26
+            elif total_eps > 10:
+                dynamic_crf = 24
+            else:
+                dynamic_crf = 22
+            
+            logger.info(f"Using Dynamic CRF: {dynamic_crf} for {total_eps} episodes (ID: {drama_id})")
+            
             temp_dir = os.path.join(DOWNLOAD_DIR, f"{worker_name}_{drama_id}")
             os.makedirs(temp_dir, exist_ok=True)
 
-            video_files = []
+            current_part_videos = []
+            current_part_size = 0
+            part_count = 1
+            
+            thumb = os.path.join(temp_dir, "poster.jpg")
+            await self.downloader.download_file(drama_info.get("cover"), thumb)
+            synopsis = drama_info.get("description") or drama_info.get("synopsis") or "..."
+            
+            # Intro notification
+            await self.uploader.client.send_file(CHANNEL_ID, thumb, caption=f"🎬 **{title}**\n\n📝 **Sinopsis:**\n{synopsis}")
+
             for i, ep in enumerate(episodes):
                 ep_n = ep.get("index") or ep.get("episode_num") or ep.get("ep")
                 if ep_n is None: continue
@@ -281,11 +311,11 @@ class FreeReelsBot:
                 stream = await self.api.get_stream(drama_id, ep_n)
                 if not stream: continue
                 
-                # 1. Ambil Video URL
+                # 1. Video URL
                 video_url = stream.get("video_url") or stream.get("m3u8_url")
                 if not video_url: continue
                 
-                # 2. Cari Subtitle id-ID
+                # 2. Subtitle id-ID
                 sub_url = None
                 sub_list = stream.get("subtitle_list", [])
                 for sub in sub_list:
@@ -293,7 +323,7 @@ class FreeReelsBot:
                         sub_url = sub.get("subtitle") or sub.get("vtt")
                         break
                 
-                # 3. Download Video & Sub
+                # 3. Download
                 raw_video = os.path.join(temp_dir, f"raw_ep_{ep_n}.mp4")
                 burned_video = os.path.join(temp_dir, f"ep_{ep_n}.mp4")
                 
@@ -306,68 +336,110 @@ class FreeReelsBot:
                         sub_path = os.path.join(temp_dir, f"sub_{ep_n}.{sub_ext}")
                         await self.downloader.download_file(sub_url, sub_path)
                         
-                        # 4. Burning Subtitle
                         await self.update_progress_ui(feedback_target, title, f"Burning Sub Eps {i+1}", i + 0.5, total_eps, start_time)
-                        if self.merger.burn_subtitle(raw_video, sub_path, burned_video):
-                            video_files.append(burned_video)
+                        if self.merger.burn_subtitle(raw_video, sub_path, burned_video, crf=dynamic_crf):
                             try: os.remove(raw_video); os.remove(sub_path)
                             except: pass
                         else:
-                            # Fallback if burn fails
-                            video_files.append(raw_video)
+                            os.rename(raw_video, burned_video)
                     else:
-                        # No sub found, use raw
                         os.rename(raw_video, burned_video)
-                        video_files.append(burned_video)
+                    
+                    # Size Check for Splitting
+                    ep_size = os.path.getsize(burned_video)
+                    if current_part_size + ep_size > MAX_UPLOAD_SIZE and current_part_videos:
+                        # Merge and Upload current part
+                        merged_part = os.path.join(temp_dir, f"{safe_title}_Part_{part_count}.mp4")
+                        await self.update_progress_ui(feedback_target, title, f"Merging Part {part_count}...", 0.95, 1, start_time)
+                        if self.merger.merge_episodes(current_part_videos, merged_part):
+                            ul_start_time = time.time()
+                            async def ul_prog(c, t):
+                                await self.update_progress_ui(feedback_target, title, f"Uploading Part {part_count}", c, t, ul_start_time)
+                            
+                            if not await self.uploader.upload_video(merged_part, f"🎞 **{title} (Part {part_count})** #FreeReels", thumb, progress_callback=ul_prog):
+                                return False # Upload failed
+                            
+                            # Cleanup this part's videos
+                            for f in current_part_videos:
+                                try: os.remove(f)
+                                except: pass
+                            try: os.remove(merged_part)
+                            except: pass
+                            
+                            part_count += 1
+                            current_part_videos = []
+                            current_part_size = 0
+                        else:
+                            return False # Merge failure
+                    
+                    current_part_videos.append(burned_video)
+                    current_part_size += ep_size
                 else:
                     return False
 
-            merged = os.path.join(temp_dir, f"{title}_Full.mp4")
-            await self.update_progress_ui(feedback_target, title, "Final Merging...", 0.95, 1, start_time)
-            
-            if not self.merger.merge_episodes(video_files, merged):
-                if not self.merger.merge_episodes(video_files, merged, False): return False
+            # Final Part
+            if current_part_videos:
+                suffix = "Full" if part_count == 1 else f"Part_{part_count}"
+                merged = os.path.join(temp_dir, f"{safe_title}_{suffix}.mp4")
+                await self.update_progress_ui(feedback_target, title, f"Final Merging ({suffix})...", 0.95, 1, start_time)
+                
+                if not self.merger.merge_episodes(current_part_videos, merged):
+                    if not self.merger.merge_episodes(current_part_videos, merged, False): return False
 
-            thumb = os.path.join(temp_dir, "poster.jpg")
-            await self.downloader.download_file(drama_info.get("cover"), thumb)
-            synopsis = drama_info.get("description") or drama_info.get("synopsis") or "..."
-            await self.uploader.client.send_file(CHANNEL_ID, thumb, caption=f"🎬 **{title}**\n\n📝 **Sinopsis:**\n{synopsis}")
-            async def ul_prog(c, t):
-                await self.update_progress_ui(feedback_target, title, "Uploading Video", c, t, time.time())
-            if await self.uploader.upload_video(merged, f"🎞 **{title}** #FreeReels", thumb, progress_callback=ul_prog):
-                self.db.mark_success(title)
-                await self.notify_admin(f"✅ Selesai: **{title}**")
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                return True
-            return False
+                ul_start_time = time.time()
+                async def last_ul_prog(c, t):
+                    await self.update_progress_ui(feedback_target, title, f"Uploading {suffix}", c, t, ul_start_time)
+                
+                caption = f"🎞 **{title}** #FreeReels" if part_count == 1 else f"🎞 **{title} ({suffix.replace('_', ' ')})** #FreeReels"
+                if await self.uploader.upload_video(merged, caption, thumb, progress_callback=last_ul_prog):
+                    self.db.mark_success(title)
+                    self.pg_db.mark_success(title)
+                    await self.notify_admin(f"✅ Selesai: **{title}**")
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    return True
+                return False
+            
+            return True
         except Exception as e:
             logger.error(f"Error: {e}")
             return False
 
     async def auto_mode_producer(self):
-        srcs = [("For You", self.api.get_foryou), ("Popular", self.api.get_popular), ("New", self.api.get_new)]
-        idx = 0
+        """Scans for new dramas and adds them to queue."""
+        logger.info("Auto Mode Producer started (monitoring 'New' and 'Last' arrivals)...")
+        # Priority on 'New' as requested by user
+        srcs = [("New Arrivals", self.api.get_new), ("Trending", self.api.get_popular), ("Discover", self.api.get_foryou)]
+        
         while True:
             try:
-                name, func = srcs[idx]
-                res = await func()
-                if res and res.get("data"):
-                    for item in res["data"]:
-                        d_id = item.get("id")
-                        # Some IDs might be 0, extract from deep_link if needed
-                        if d_id == 0 and item.get("deep_link"):
-                            try:
-                                parsed = urllib.parse.urlparse(item.get('deep_link'))
-                                qs = urllib.parse.parse_qs(parsed.query)
-                                if 'id' in qs: d_id = qs['id'][0]
-                            except: pass
+                for name, func in srcs:
+                    logger.info(f"🔍 Auto-scanning source: {name}")
+                    res = await func()
+                    if res and res.get("data"):
+                        count_added = 0
+                        for item in res["data"]:
+                            d_id = item.get("id")
+                            if d_id == 0 and item.get("deep_link"):
+                                try:
+                                    parsed = urllib.parse.urlparse(item.get('deep_link'))
+                                    qs = urllib.parse.parse_qs(parsed.query)
+                                    if 'id' in qs: d_id = qs['id'][0]
+                                except: pass
+                            
+                            title = item.get("title") or item.get("name")
+                            if d_id and not (self.db.is_processed(title) or self.pg_db.is_processed(title)):
+                                if not self.task_queue.is_queued(str(d_id)) and not self.task_queue.is_processing(str(d_id)):
+                                    await self.task_queue.put(DramaTask(PRIORITY_LOW, str(d_id)))
+                                    count_added += 1
                         
-                        title = item.get("title") or item.get("name")
-                        if d_id and not self.db.is_processed(title):
-                            await self.task_queue.put(DramaTask(PRIORITY_LOW, str(d_id)))
-                idx = (idx + 1) % len(srcs)
-            except: pass
-            await asyncio.sleep(AUTO_SCAN_INTERVAL)
+                        if count_added > 0:
+                            logger.info(f"➕ Auto Mode found {count_added} new items from {name}")
+                
+                # Check New/Last more frequently, but others less
+                await asyncio.sleep(AUTO_SCAN_INTERVAL)
+            except Exception as e:
+                logger.error(f"Auto Mode Error: {e}")
+                await asyncio.sleep(60) # Wait a bit on error before retry
 
 if __name__ == "__main__":
     bot = FreeReelsBot()
