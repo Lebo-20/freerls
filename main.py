@@ -337,7 +337,7 @@ class FreeReelsBot:
                         await self.downloader.download_file(sub_url, sub_path)
                         
                         await self.update_progress_ui(feedback_target, title, f"Burning Sub Eps {i+1}", i + 0.5, total_eps, start_time)
-                        if self.merger.burn_subtitle(raw_video, sub_path, burned_video, crf=dynamic_crf):
+                        if await self.merger.burn_subtitle(raw_video, sub_path, burned_video, crf=dynamic_crf):
                             try: os.remove(raw_video); os.remove(sub_path)
                             except: pass
                         else:
@@ -351,7 +351,7 @@ class FreeReelsBot:
                         # Merge and Upload current part
                         merged_part = os.path.join(temp_dir, f"{safe_title}_Part_{part_count}.mp4")
                         await self.update_progress_ui(feedback_target, title, f"Merging Part {part_count}...", 0.95, 1, start_time)
-                        if self.merger.merge_episodes(current_part_videos, merged_part):
+                        if await self.merger.merge_episodes(current_part_videos, merged_part):
                             ul_start_time = time.time()
                             async def ul_prog(c, t):
                                 await self.update_progress_ui(feedback_target, title, f"Uploading Part {part_count}", c, t, ul_start_time)
@@ -383,8 +383,8 @@ class FreeReelsBot:
                 merged = os.path.join(temp_dir, f"{safe_title}_{suffix}.mp4")
                 await self.update_progress_ui(feedback_target, title, f"Final Merging ({suffix})...", 0.95, 1, start_time)
                 
-                if not self.merger.merge_episodes(current_part_videos, merged):
-                    if not self.merger.merge_episodes(current_part_videos, merged, False): return False
+                if not await self.merger.merge_episodes(current_part_videos, merged):
+                    if not await self.merger.merge_episodes(current_part_videos, merged, False): return False
 
                 ul_start_time = time.time()
                 async def last_ul_prog(c, t):

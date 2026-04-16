@@ -15,7 +15,7 @@ Bot otomatis untuk mengunduh, menggabungkan, dan mengunggah drama dari FreeReels
 ### 1. Persiapan Environment
 ```bash
 sudo apt update && sudo apt upgrade -y
-sudo apt install python3 python3-pip ffmpeg screen -y
+sudo apt install python3 python3-pip ffmpeg aria2 screen -y
 ```
 
 ### 2. Clone Repository

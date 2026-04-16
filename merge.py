@@ -1,4 +1,5 @@
 import subprocess
+import asyncio
 import os
 import logging
 from config import FFMPEG_CRF, FFMPEG_PRESET
@@ -7,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 class VideoMerger:
     @staticmethod
-    def merge_episodes(video_paths, output_path, fast_mode=True):
+    async def merge_episodes(video_paths, output_path, fast_mode=True):
         if not video_paths:
             logger.error("No videos to merge")
             return False
@@ -34,11 +35,14 @@ class VideoMerger:
                 ]
 
             logger.info(f"Running merge command: {' '.join(cmd)}")
-            process = subprocess.run(cmd, capture_output=True, text=True)
+            process = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
             
             if process.returncode != 0:
                 logger.error(f"FFmpeg Merge Failed (code {process.returncode})")
-                logger.error(f"Stderr: {process.stderr}")
+                logger.error(f"Stderr: {stderr.decode()}")
                 return False
             
             return True
@@ -51,7 +55,7 @@ class VideoMerger:
                 except: pass
 
     @staticmethod
-    def burn_subtitle(video_path, sub_path, output_path, crf=None):
+    async def burn_subtitle(video_path, sub_path, output_path, crf=None):
         """Hardcode subtitle into video with custom styling."""
         if not os.path.exists(sub_path):
             logger.error(f"Subtitle file not found: {sub_path}")
@@ -79,11 +83,14 @@ class VideoMerger:
             ]
             
             logger.info(f"Running burn command: {' '.join(cmd)}")
-            process = subprocess.run(cmd, capture_output=True, text=True)
+            process = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
             
             if process.returncode != 0:
                 logger.error(f"FFmpeg Burn Failed (code {process.returncode})")
-                logger.error(f"Stderr: {process.stderr}")
+                logger.error(f"Stderr: {stderr.decode()}")
                 return False
                 
             return True
